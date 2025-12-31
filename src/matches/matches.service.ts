@@ -57,7 +57,7 @@ export class MatchesService {
             canAction = !isRequester;
         } 
         else if (match.status === MatchStatus.ACCEPTED) {
-            displayStatus = 'Matched! 🚀 Coordinate now.';
+            displayStatus = 'Matched! Coordinate now.';
             canAction = false;
         } 
         else if (match.status === MatchStatus.REJECTED) {
