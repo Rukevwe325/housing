@@ -15,6 +15,7 @@ async function bootstrap() {
         'http://10.56.44.249:3000',
         'http://10.56.44.249',
         'http://localhost',
+        'https://dconnect-six.vercel.app',
         'capacitor://localhost',
         'http://localhost:5173', // Adding default Vite port just in case
       ];
