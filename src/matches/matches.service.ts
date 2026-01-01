@@ -36,6 +36,7 @@ export class MatchesService {
 
     /**
      * Maps entity to DTO with User-Centric Display Logic
+     * ✅ UPDATED: Added availableLuggageSpace to trip object
      */
     private mapToResponseDto(match: Match, currentUserId?: string): MatchResponseDto {
         const isRequester = match.itemRequest?.requesterId === currentUserId;
@@ -81,6 +82,7 @@ export class MatchesService {
                 toCity: match.itemRequest.toCity,
                 weightKg: match.itemRequest.weightKg,
                 requesterId: match.itemRequest.requesterId,
+                desiredDeliveryDate: match.itemRequest.desiredDeliveryDate,
             } : null,
             trip: match.trip ? {
                 id: match.trip.id,
@@ -88,6 +90,7 @@ export class MatchesService {
                 toCity: match.trip.toCity,
                 departureDate: match.trip.departureDate,
                 carrierId: match.trip.carrierId,
+                availableLuggageSpace: match.trip.availableLuggageSpace, // 👈 Added this field
             } : null,
         } as any;
     }
@@ -100,8 +103,8 @@ export class MatchesService {
         page: number = 1, 
         limit: number = 10,
         statusFilter?: string,
-        tripId?: number,        // 👈 Filter by specific Trip
-        itemRequestId?: number  // 👈 Filter by specific Item Request
+        tripId?: number,
+        itemRequestId?: number
     ): Promise<{ data: MatchResponseDto[], total: number, page: number, lastPage: number }> {
         
         const skip = (page - 1) * limit;
@@ -111,15 +114,9 @@ export class MatchesService {
             .leftJoinAndSelect('match.trip', 'trip')
             .where('(request.requesterId = :userId OR trip.carrierId = :userId)', { userId });
 
-        // --- Contextual Filters ---
-        if (tripId) {
-            query.andWhere('match.tripId = :tripId', { tripId });
-        }
-        if (itemRequestId) {
-            query.andWhere('match.itemRequestId = :itemRequestId', { itemRequestId });
-        }
+        if (tripId) query.andWhere('match.tripId = :tripId', { tripId });
+        if (itemRequestId) query.andWhere('match.itemRequestId = :itemRequestId', { itemRequestId });
 
-        // --- Status Toggle Filters ---
         if (statusFilter) {
             const filter = statusFilter.toUpperCase();
             if (filter === 'PENDING') {
@@ -133,7 +130,6 @@ export class MatchesService {
             }
         }
 
-        // --- Apply Weight Constraint only for PENDING matches ---
         query.andWhere(`(
                 match.status != :pStatus OR 
                 CAST(request.weightKg AS DECIMAL) <= CAST(trip.availableLuggageSpace AS DECIMAL)

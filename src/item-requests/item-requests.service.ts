@@ -18,13 +18,12 @@ import { TripsService } from '../trips/trips.service';
 
 /**
  * Interface used for matching logic between Trips and Item Requests.
- * ✅ UPDATED: Added returnDate to fix TS2353 compilation error.
  */
 export interface TripMatchCriteria {
     fromCountry: string;
     toCountry: string;
     departureDate: string; 
-    returnDate?: string; // 👈 This allows TripsService to pass the returnDate
+    returnDate?: string;
 }
 
 @Injectable()
@@ -40,14 +39,25 @@ export class ItemRequestsService {
     ) {}
 
     /**
-     * Creates a new item request with duplicate check and matching trigger.
+     * Creates a new item request with date validation, duplicate check, and matching trigger.
      */
     async create(
         createItemRequestDto: CreateItemRequestDto, 
         requesterId: string
     ): Promise<ItemRequestResponseDto> {
         
-        // 🔍 Duplicate Check
+        // 1. 📅 Date Validation: Prevent past dates
+        const desiredDate = new Date(createItemRequestDto.desiredDeliveryDate);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0); // Strip time for date-only comparison
+
+        if (desiredDate < today) {
+            throw new BadRequestException(
+                `Invalid Date: Desired delivery date (${createItemRequestDto.desiredDeliveryDate}) cannot be in the past.`
+            );
+        }
+
+        // 2. 🔍 Duplicate Check
         const existingRequest = await this.itemRequestsRepository
             .createQueryBuilder('request')
             .where('request.requesterId = :requesterId', { requesterId })
@@ -83,8 +93,7 @@ export class ItemRequestsService {
     }
     
     /**
-     * ✅ Paginated "My Requests"
-     * Fetches only a specific slice of data to optimize performance.
+     * Paginated "My Requests"
      */
     async findMyRequests(
         requesterId: string,
@@ -94,10 +103,9 @@ export class ItemRequestsService {
         
         const skip = (page - 1) * limit;
 
-        // findAndCount returns [data, totalCount]
         const [requests, total] = await this.itemRequestsRepository.findAndCount({
             where: { requesterId },
-            relations: ['matches'], // Load matches to count them
+            relations: ['matches'], 
             order: { createdAt: 'DESC' }, 
             skip: skip,
             take: limit,
@@ -113,18 +121,18 @@ export class ItemRequestsService {
         };
     }
 
-/**
- * Gets the total number of active item requests for a specific user.
- */
-async countMyRequests(requesterId: string): Promise<{ count: number }> {
-    const count = await this.itemRequestsRepository.count({
-        where: { 
-            requesterId,
-            status: 'active' 
-        },
-    });
-    return { count };
-}
+    /**
+     * Gets the total number of active item requests for a specific user.
+     */
+    async countMyRequests(requesterId: string): Promise<{ count: number }> {
+        const count = await this.itemRequestsRepository.count({
+            where: { 
+                requesterId,
+                status: 'active' 
+            },
+        });
+        return { count };
+    }
 
     /**
      * Logic for TripsService to find requests that match a Trip.
@@ -147,6 +155,7 @@ async countMyRequests(requesterId: string): Promise<{ count: number }> {
 
     /**
      * Internal trigger for the matching engine.
+     * UPDATED: Added self-matching prevention check.
      */
     private async triggerMatchingProcess(newRequest: ItemRequest): Promise<void> {
         try {
@@ -155,7 +164,10 @@ async countMyRequests(requesterId: string): Promise<{ count: number }> {
             if (matchingTrips.length === 0) return;
 
             for (const trip of matchingTrips) {
-                if (newRequest.weightKg <= trip.availableLuggageSpace) {
+                // LOOPHOLE FIX: Don't match the requester with their own trips
+                if (trip.carrierId === newRequest.requesterId) continue;
+
+                if (Number(newRequest.weightKg) <= Number(trip.availableLuggageSpace)) {
                     await this.matchesService.createMatchRecord(trip, newRequest);
                 }
             }
