@@ -9,6 +9,7 @@ import { TripsModule } from './trips/trips.module';
 import { ItemRequestsModule } from './item-requests/item-requests.module';
 import { MatchesModule } from './matches/matches.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { MessagesModule } from './messages/messages.module';
 // 🟢 FIX 3: Use default imports (no curly braces)
 import UsersModule from './users/users.module'; 
 import AuthModule from './auth/auth.module'; 
@@ -41,6 +42,7 @@ import AuthModule from './auth/auth.module';
     ItemRequestsModule,
     MatchesModule,
     NotificationsModule,
+    MessagesModule,
   ],
   controllers: [AppController],
   providers: [AppService],
