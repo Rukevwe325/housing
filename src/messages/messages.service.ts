@@ -6,13 +6,10 @@ import {
     ForbiddenException, 
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 
-// Entities
 import { Message } from './entities/message.entity';
 import { Match, MatchStatus } from '../matches/entities/match.entity';
-
-// DTOs
 import { CreateMessageDto } from './dto/create-message.dto';
 
 @Injectable()
@@ -26,14 +23,20 @@ export class MessagesService {
     ) {}
 
     /**
-     * 1. GET ALL CONVERSATIONS (The Inbox List)
-     * Shows a list of accepted matches with the other person's name and last message.
+     * 1. GET ALL CONVERSATIONS (Inbox)
+     * Includes all matches that have a message history, regardless of current status.
      */
     async getMyConversations(userId: string) {
         const activeMatches = await this.matchRepo.find({
             where: [
-                { status: MatchStatus.ACCEPTED, trip: { carrierId: userId } },
-                { status: MatchStatus.ACCEPTED, itemRequest: { requesterId: userId } },
+                { 
+                    status: In([MatchStatus.ACCEPTED, 'rejected', 'canceled', 'completed']), 
+                    trip: { carrierId: userId } 
+                },
+                { 
+                    status: In([MatchStatus.ACCEPTED, 'rejected', 'canceled', 'completed']), 
+                    itemRequest: { requesterId: userId } 
+                },
             ],
             relations: [
                 'itemRequest', 
@@ -57,6 +60,7 @@ export class MessagesService {
 
                 return {
                     matchId: match.id,
+                    status: match.status,
                     lastMessage: lastMessage?.content || "No messages yet",
                     lastMessageDate: lastMessage?.createdAt || match.createdAt,
                     otherParty: {
@@ -72,7 +76,6 @@ export class MessagesService {
             })
         );
 
-        // Sort: newest messages at the top
         return inbox.sort((a, b) => 
             new Date(b.lastMessageDate).getTime() - new Date(a.lastMessageDate).getTime()
         );
@@ -80,7 +83,7 @@ export class MessagesService {
 
     /**
      * 2. SEND MESSAGE
-     * Guarded by MatchStatus.ACCEPTED
+     * STRICT: Only allowed if status is currently ACCEPTED.
      */
     async create(senderId: string, createMessageDto: CreateMessageDto) {
         const { matchId, content } = createMessageDto;
@@ -92,8 +95,11 @@ export class MessagesService {
 
         if (!match) throw new NotFoundException(`Match ${matchId} not found.`);
 
+        // Safety: Block new messages if the deal is no longer active
         if (match.status !== MatchStatus.ACCEPTED) {
-            throw new ForbiddenException('Messaging is locked. Handshake not complete.');
+            throw new ForbiddenException(
+                `Messaging is disabled because this match is currently ${match.status}.`
+            );
         }
 
         const isParticipant = 
@@ -112,11 +118,10 @@ export class MessagesService {
     }
 
     /**
-     * 3. GET CHAT HISTORY (Rich Data)
-     * Returns match metadata + message list in one go.
+     * 3. GET CHAT HISTORY
+     * Returns rich data including metadata to help the frontend lock/unlock the UI.
      */
     async findAllByMatch(matchId: number, userId: string) {
-        // Fetch match with all user relations to identify the other party
         const match = await this.matchRepo.findOne({
             where: { id: matchId },
             relations: [
@@ -129,7 +134,6 @@ export class MessagesService {
 
         if (!match) throw new NotFoundException(`Match ${matchId} not found.`);
 
-        // Security Check & Identification
         const isCarrier = match.trip?.carrierId === userId;
         const isRequester = match.itemRequest?.requesterId === userId;
 
@@ -137,19 +141,20 @@ export class MessagesService {
             throw new ForbiddenException('You do not have permission to view this chat.');
         }
 
-        // Fetch the actual messages
         const messages = await this.messageRepo.find({
             where: { matchId },
             order: { createdAt: 'ASC' },
         });
 
-        // Determine the Other Party details
         const otherParty = isCarrier ? match.itemRequest?.requester : match.trip?.carrier;
 
         return {
             chatInfo: {
                 matchId: match.id,
                 status: match.status,
+                // UI HELPER: Frontend uses this to enable/disable the input box
+                canSendMessage: match.status === MatchStatus.ACCEPTED,
+                isLocked: match.status !== MatchStatus.ACCEPTED,
                 otherParty: {
                     id: otherParty?.id,
                     firstName: otherParty?.firstName,
