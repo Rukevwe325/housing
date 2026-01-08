@@ -117,7 +117,7 @@ export class NotificationsService {
     }
 
     /**
-     * Mark a specific notification as read.
+     * Mark a specific notification as- read.
      */
     async markAsRead(id: number, userId: string) {
         const notification = await this.notificationRepo.findOne({ 
