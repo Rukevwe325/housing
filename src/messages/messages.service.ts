@@ -8,9 +8,15 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 
+// Entities
 import { Message } from './entities/message.entity';
 import { Match, MatchStatus } from '../matches/entities/match.entity';
+
+// DTOs
 import { CreateMessageDto } from './dto/create-message.dto';
+
+// Gateway
+import { NotificationsGateway } from '../notifications/notifications.gateway';
 
 @Injectable()
 export class MessagesService {
@@ -20,6 +26,9 @@ export class MessagesService {
 
         @InjectRepository(Match)
         private readonly matchRepo: Repository<Match>,
+
+        // 🟢 Injecting the WebSocket gateway to enable real-time features
+        private readonly notificationsGateway: NotificationsGateway,
     ) {}
 
     /**
@@ -83,7 +92,7 @@ export class MessagesService {
 
     /**
      * 2. SEND MESSAGE
-     * STRICT: Only allowed if status is currently ACCEPTED.
+     * Saves to DB and then pushes via WebSocket to the recipient.
      */
     async create(senderId: string, createMessageDto: CreateMessageDto) {
         const { matchId, content } = createMessageDto;
@@ -95,31 +104,61 @@ export class MessagesService {
 
         if (!match) throw new NotFoundException(`Match ${matchId} not found.`);
 
-        // Safety: Block new messages if the deal is no longer active
         if (match.status !== MatchStatus.ACCEPTED) {
             throw new ForbiddenException(
                 `Messaging is disabled because this match is currently ${match.status}.`
             );
         }
 
-        const isParticipant = 
-            match.itemRequest?.requesterId === senderId || 
-            match.trip?.carrierId === senderId;
+        const isCarrier = match.trip?.carrierId === senderId;
+        const isRequester = match.itemRequest?.requesterId === senderId;
 
-        if (!isParticipant) throw new ForbiddenException('Unauthorized.');
+        if (!isCarrier && !isRequester) throw new ForbiddenException('Unauthorized.');
 
-        const newMessage = this.messageRepo.create({
-            matchId,
-            senderId,
-            content,
+        // 1. Save to Database
+        const newMessage = await this.messageRepo.save(
+            this.messageRepo.create({
+                matchId,
+                senderId,
+                content,
+            })
+        );
+
+        // 2. Push via WebSocket
+        const recipientId = isCarrier ? match.itemRequest.requesterId : match.trip.carrierId;
+        
+        this.notificationsGateway.sendMessageToUser(recipientId, {
+            ...newMessage,
+            senderFirstName: isCarrier ? match.trip.carrier?.firstName : match.itemRequest.requester?.firstName
         });
 
-        return await this.messageRepo.save(newMessage);
+        return newMessage;
     }
 
     /**
-     * 3. GET CHAT HISTORY
-     * Returns rich data including metadata to help the frontend lock/unlock the UI.
+     * 3. TYPING INDICATOR (Real-time only)
+     * Pushes typing status to the other party without touching the database.
+     */
+    async notifyTyping(senderId: string, matchId: number, isTyping: boolean) {
+        const match = await this.matchRepo.findOne({
+            where: { id: matchId },
+            relations: ['itemRequest', 'trip'],
+        });
+
+        if (!match || match.status !== MatchStatus.ACCEPTED) return;
+
+        const recipientId = match.trip.carrierId === senderId 
+            ? match.itemRequest.requesterId 
+            : match.trip.carrierId;
+
+        this.notificationsGateway.sendTypingStatus(recipientId, {
+            matchId,
+            isTyping,
+        });
+    }
+
+    /**
+     * 4. GET CHAT HISTORY
      */
     async findAllByMatch(matchId: number, userId: string) {
         const match = await this.matchRepo.findOne({
@@ -152,7 +191,6 @@ export class MessagesService {
             chatInfo: {
                 matchId: match.id,
                 status: match.status,
-                // UI HELPER: Frontend uses this to enable/disable the input box
                 canSendMessage: match.status === MatchStatus.ACCEPTED,
                 isLocked: match.status !== MatchStatus.ACCEPTED,
                 otherParty: {
