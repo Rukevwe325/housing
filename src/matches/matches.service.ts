@@ -36,7 +36,7 @@ export class MatchesService {
 
     /**
      * Maps entity to DTO with User-Centric Display Logic
-     * ✅ UPDATED: Added availableLuggageSpace to trip object
+     * Handles the text and button visibility for the Frontend
      */
     private mapToResponseDto(match: Match, currentUserId?: string): MatchResponseDto {
         const isRequester = match.itemRequest?.requesterId === currentUserId;
@@ -58,9 +58,14 @@ export class MatchesService {
             canAction = !isRequester;
         } 
         else if (match.status === MatchStatus.ACCEPTED) {
-            displayStatus = 'Matched! Coordinate now.';
-            canAction = false;
+            displayStatus = 'In Progress - Coordinate Delivery';
+            // Only the requester (receiver) can mark as COMPLETED
+            canAction = isRequester; 
         } 
+        else if (match.status === MatchStatus.COMPLETED) {
+            displayStatus = 'Successfully Delivered';
+            canAction = false;
+        }
         else if (match.status === MatchStatus.REJECTED) {
             displayStatus = 'Declined';
             canAction = false;
@@ -90,13 +95,13 @@ export class MatchesService {
                 toCity: match.trip.toCity,
                 departureDate: match.trip.departureDate,
                 carrierId: match.trip.carrierId,
-                availableLuggageSpace: match.trip.availableLuggageSpace, // 👈 Added this field
+                availableLuggageSpace: match.trip.availableLuggageSpace,
             } : null,
         } as any;
     }
 
     /**
-     * Paginated fetch for User Matches with Status AND Contextual Filtering (Trip/Request).
+     * Paginated fetch for User Matches
      */
     async findMatchesByUserId(
         userId: string, 
@@ -123,6 +128,8 @@ export class MatchesService {
                 query.andWhere('match.status = :fStatus', { fStatus: MatchStatus.PENDING });
             } else if (filter === 'REJECTED') {
                 query.andWhere('match.status = :fStatus', { fStatus: MatchStatus.REJECTED });
+            } else if (filter === 'COMPLETED') {
+                query.andWhere('match.status = :fStatus', { fStatus: MatchStatus.COMPLETED });
             } else if (filter === 'ACCEPTED') {
                 query.andWhere('match.status IN (:...statuses)', { 
                     statuses: [MatchStatus.ACCEPTED, MatchStatus.CARRIER_ACCEPTED, MatchStatus.REQUESTER_ACCEPTED] 
@@ -130,6 +137,7 @@ export class MatchesService {
             }
         }
 
+        // Filter out matches where weight exceeds current capacity (for Pending only)
         query.andWhere(`(
                 match.status != :pStatus OR 
                 CAST(request.weightKg AS DECIMAL) <= CAST(trip.availableLuggageSpace AS DECIMAL)
@@ -150,8 +158,91 @@ export class MatchesService {
     }
 
     /**
-     * Gets PENDING count.
+     * Double Handshake & Delivery Completion logic
      */
+    async updateMatchStatus(
+        matchId: number, 
+        updateDto: UpdateMatchStatusDto, 
+        currentUserId: string
+    ): Promise<MatchResponseDto> {
+        
+        const match = await this.matchesRepository.findOne({
+            where: { id: matchId },
+            relations: ['itemRequest', 'trip'], 
+        });
+
+        if (!match) throw new NotFoundException(`Match ${matchId} not found.`);
+
+        const isRequester = match.itemRequest.requesterId === currentUserId;
+        const isCarrier = match.trip.carrierId === currentUserId;
+        if (!isRequester && !isCarrier) throw new UnauthorizedException('Not authorized.');
+        
+        const oldStatus = match.status;
+        const requestedAction = updateDto.status;
+        const recipientId = isRequester ? match.trip.carrierId : match.itemRequest.requesterId;
+
+        // Block modifications on finalized states
+        if (oldStatus === MatchStatus.REJECTED || oldStatus === MatchStatus.COMPLETED) {
+            throw new BadRequestException(`Cannot modify match in ${oldStatus} state.`);
+        }
+
+        // --- ACTION: REJECTED ---
+        if (requestedAction === MatchStatus.REJECTED) {
+            if (oldStatus !== MatchStatus.PENDING) await this.handleWeightRefund(match);
+            match.status = MatchStatus.REJECTED;
+            await this.notificationsService.notify(recipientId, 'Match Declined', 'The other party declined the match.', NotificationType.MATCH_UPDATE, matchId.toString());
+        } 
+        
+        // --- ACTION: ACCEPTED (Handshake) ---
+        else if (requestedAction === MatchStatus.ACCEPTED) {
+            if (isCarrier) {
+                if (oldStatus === MatchStatus.PENDING) {
+                    await this.handleWeightDeduction(match);
+                    match.status = MatchStatus.CARRIER_ACCEPTED;
+                } else if (oldStatus === MatchStatus.REQUESTER_ACCEPTED) {
+                    await this.handleWeightDeduction(match);
+                    match.status = MatchStatus.ACCEPTED;
+                }
+            } 
+            else if (isRequester) {
+                if (oldStatus === MatchStatus.PENDING) {
+                    match.status = MatchStatus.REQUESTER_ACCEPTED;
+                } else if (oldStatus === MatchStatus.CARRIER_ACCEPTED) {
+                    match.status = MatchStatus.ACCEPTED;
+                }
+            }
+            await this.notificationsService.notify(recipientId, 'Match Update', 'Your match status has been updated.', NotificationType.MATCH_UPDATE, matchId.toString());
+        }
+
+        // --- ACTION: COMPLETED (The Delivery Confirm) ---
+        else if (requestedAction === MatchStatus.COMPLETED) {
+            if (!isRequester) throw new BadRequestException('Only the requester can mark a transaction as completed.');
+            if (oldStatus !== MatchStatus.ACCEPTED) throw new BadRequestException('Match must be fully accepted before completion.');
+
+            match.status = MatchStatus.COMPLETED;
+            await this.notificationsService.notify(recipientId, 'Delivery Confirmed!', 'The requester confirmed receipt of the item.', NotificationType.MATCH_UPDATE, matchId.toString());
+        }
+
+        const updatedMatch = await this.matchesRepository.save(match);
+        return this.mapToResponseDto(updatedMatch, currentUserId);
+    }
+
+    private async handleWeightDeduction(match: Match): Promise<void> {
+        const itemWeight = Number(match.itemRequest.weightKg);
+        const availableSpace = Number(match.trip.availableLuggageSpace);
+        if (availableSpace < itemWeight) throw new BadRequestException(`Insufficient luggage space.`);
+        
+        match.trip.availableLuggageSpace = availableSpace - itemWeight;
+        match.agreedWeightKg = itemWeight;
+        await this.tripsRepository.save(match.trip);
+    }
+
+    private async handleWeightRefund(match: Match): Promise<void> {
+        const refund = Number(match.agreedWeightKg || match.itemRequest.weightKg);
+        match.trip.availableLuggageSpace = Number(match.trip.availableLuggageSpace) + refund;
+        await this.tripsRepository.save(match.trip);
+    }
+
     async countPendingMatches(userId: string): Promise<{ count: number }> {
         const count = await this.matchesRepository
             .createQueryBuilder('match')
@@ -161,13 +252,9 @@ export class MatchesService {
             .andWhere('(request.requesterId = :userId OR trip.carrierId = :userId)', { userId })
             .andWhere('CAST(request.weightKg AS DECIMAL) <= CAST(trip.availableLuggageSpace AS DECIMAL)')
             .getCount();
-
         return { count };
     }
 
-    /**
-     * Creates a match record.
-     */
     async createMatchRecord(trip: Trip, request: ItemRequest): Promise<MatchResponseDto | null> {
         if (trip.carrierId === request.requesterId) return null; 
         if (Number(request.weightKg) > Number(trip.availableLuggageSpace)) return null;
@@ -194,88 +281,12 @@ export class MatchesService {
         return fullMatch ? this.mapToResponseDto(fullMatch, trip.carrierId) : null;
     }
 
-    /**
-     * Gets a single match.
-     */
     async findOne(matchId: number, currentUserId: string): Promise<MatchResponseDto> {
         const match = await this.matchesRepository.findOne({
             where: { id: matchId },
             relations: ['itemRequest', 'trip'],
         });
-
         if (!match) throw new NotFoundException(`Match ${matchId} not found.`);
         return this.mapToResponseDto(match, currentUserId);
-    }
-
-    /**
-     * Double Handshake Status Updates.
-     */
-    async updateMatchStatus(
-        matchId: number, 
-        updateDto: UpdateMatchStatusDto, 
-        currentUserId: string
-    ): Promise<MatchResponseDto> {
-        
-        const match = await this.matchesRepository.findOne({
-            where: { id: matchId },
-            relations: ['itemRequest', 'trip'], 
-        });
-
-        if (!match) throw new NotFoundException(`Match ${matchId} not found.`);
-
-        const isRequester = match.itemRequest.requesterId === currentUserId;
-        const isCarrier = match.trip.carrierId === currentUserId;
-        if (!isRequester && !isCarrier) throw new UnauthorizedException('Not authorized.');
-        
-        const oldStatus = match.status;
-        const requestedAction = updateDto.status;
-        const recipientId = isRequester ? match.trip.carrierId : match.itemRequest.requesterId;
-
-        if (oldStatus === MatchStatus.REJECTED || oldStatus === MatchStatus.COMPLETED) {
-            throw new BadRequestException(`Cannot modify match in ${oldStatus} state.`);
-        }
-
-        if (requestedAction === MatchStatus.REJECTED) {
-            if (oldStatus !== MatchStatus.PENDING) await this.handleWeightRefund(match);
-            match.status = MatchStatus.REJECTED;
-            await this.notificationsService.notify(recipientId, 'Match Declined', 'The other party declined.', NotificationType.MATCH_UPDATE, matchId.toString());
-        } 
-        else if (requestedAction === MatchStatus.ACCEPTED) {
-            if (isCarrier) {
-                if (oldStatus === MatchStatus.PENDING) {
-                    await this.handleWeightDeduction(match);
-                    match.status = MatchStatus.CARRIER_ACCEPTED;
-                } else if (oldStatus === MatchStatus.REQUESTER_ACCEPTED) {
-                    await this.handleWeightDeduction(match);
-                    match.status = MatchStatus.ACCEPTED;
-                }
-            } 
-            else if (isRequester) {
-                if (oldStatus === MatchStatus.PENDING) {
-                    match.status = MatchStatus.REQUESTER_ACCEPTED;
-                } else if (oldStatus === MatchStatus.CARRIER_ACCEPTED) {
-                    match.status = MatchStatus.ACCEPTED;
-                }
-            }
-            await this.notificationsService.notify(recipientId, 'Match Update', 'The status of your match has changed.', NotificationType.MATCH_UPDATE, matchId.toString());
-        }
-
-        const updatedMatch = await this.matchesRepository.save(match);
-        return this.mapToResponseDto(updatedMatch, currentUserId);
-    }
-
-    private async handleWeightDeduction(match: Match): Promise<void> {
-        const itemWeight = Number(match.itemRequest.weightKg);
-        const availableSpace = Number(match.trip.availableLuggageSpace);
-        if (availableSpace < itemWeight) throw new BadRequestException(`Insufficient luggage space.`);
-        match.trip.availableLuggageSpace = availableSpace - itemWeight;
-        match.agreedWeightKg = itemWeight;
-        await this.tripsRepository.save(match.trip);
-    }
-
-    private async handleWeightRefund(match: Match): Promise<void> {
-        const refund = Number(match.agreedWeightKg || match.itemRequest.weightKg);
-        match.trip.availableLuggageSpace = Number(match.trip.availableLuggageSpace) + refund;
-        await this.tripsRepository.save(match.trip);
     }
 }

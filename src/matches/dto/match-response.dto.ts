@@ -1,9 +1,5 @@
 import { MatchStatus } from '../entities/match.entity';
 
-/**
- * 1. Base DTO for a single Match record.
- * Includes nested summary objects for the associated Item and Trip.
- */
 export class MatchResponseDto {
     id: number;
     
@@ -13,13 +9,11 @@ export class MatchResponseDto {
 
     // Core Match Data
     status: MatchStatus;
+    displayStatus: string; // 👈 Add this for the custom UI text
+    canAction: boolean;    // 👈 Add this to enable/disable buttons
     agreedWeightKg: number | null;
     createdAt: Date;
 
-    /**
-     * Nested Item Request Details
-     * Marked as "| null" to prevent TS errors when relations aren't joined.
-     */
     itemRequest: {
         id: number;
         itemName: string;
@@ -27,28 +21,22 @@ export class MatchResponseDto {
         toCity: string;
         weightKg: number;
         requesterId: string;
+        desiredDeliveryDate?: Date; // Optional but good to have
     } | null;
 
-    /**
-     * Nested Trip Details
-     * Marked as "| null" to prevent TS errors when relations aren't joined.
-     */
     trip: {
         id: number;
         fromCity: string;
         toCity: string;
         departureDate: Date;
         carrierId: string;
+        availableLuggageSpace: number; // 👈 Add this to match service
     } | null;
 }
 
-/**
- * 2. ✅ NEW: Wrapper DTO for Paginated Results
- * This is what your "findMatchesByUserId" service and controller will return.
- */
 export class PaginatedMatchResponseDto {
-    data: MatchResponseDto[]; // The actual list of matches
-    total: number;             // Total count in database
-    page: number;              // Current page number
-    lastPage: number;          // Total number of pages available
+    data: MatchResponseDto[];
+    total: number;
+    page: number;
+    lastPage: number;
 }
